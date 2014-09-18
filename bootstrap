@@ -1,0 +1,4 @@
+aclocal && \
+libtoolize --automake && \
+automake --foreign --add-missing && \
+autoconf

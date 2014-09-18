@@ -1,0 +1,4 @@
+lib_LTLIBRARIES=libspotifywrapper.la
+libspotifywrapper_la_SOURCES=libspotifywrapper.c
+libspotifywrapper_la_CFLAGS=-fPIC
+libspotifywrapper_la_LDFLAGS=-shared -fPIC -lspotify
