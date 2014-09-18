@@ -77,6 +77,19 @@ static spw_session *g_head, *g_tail;
 #define SPW_SESSION(sess) ((spw_session *)sess)
 #define SP_SESSION(sess)  SPW_SESSION(sess)->s
 
+static void dump_linked_list(void)
+{
+	spw_session *p = g_head;
+	DEBUG_FN("g_head = %p g_tail = %p\n", g_head, g_tail);
+	unsigned int i = 0;
+	while (p)
+	{
+		DEBUG_FN("Element %p at index %d\n", p, i);
+		p = p->next;
+		i++;
+	}
+}
+
 static spw_session *spw_alloc_session(const sp_session_config *config)
 {
 	DEBUG_FN("IN\n");
@@ -102,6 +115,11 @@ static spw_session *spw_alloc_session(const sp_session_config *config)
     }
 
     g_nclients++;
+	DEBUG_FN("g_nclients = %d\n", g_nclients);
+
+#ifdef WITH_DEBUG
+	dump_linked_list();
+#endif
 
 	DEBUG_FN("OUT\n");
     return spw;
@@ -114,10 +132,18 @@ static void spw_free_session(spw_session *spw)
 		spw->next->prev = spw->prev;
 	if (spw->prev)
 		spw->prev->next = spw->next;
+	if (spw == g_tail)
+		g_tail = spw->prev;
+	if (spw == g_head)
+		g_head = spw->next;
 	free((void *)spw);
 	g_nclients--;
-	if (g_nclients == 0)
-		g_head = g_tail = NULL;
+	DEBUG_FN("g_nclients = %d\n", g_nclients);
+
+#ifdef WITH_DEBUG
+	dump_linked_list();
+#endif
+
 	DEBUG_FN("OUT\n");
 }
 
@@ -150,15 +176,11 @@ SP_LIBEXPORT(sp_error) spw_session_release(sp_session *sess)
 	DEBUG_FN("IN\n");
 	sp_error ret = SP_ERROR_OK;
 
-	if (g_nclients > 0)
+	spw_free_session(SPW_SESSION(sess));
+	if (g_nclients == 0)
 	{
-		g_nclients--;
-		spw_free_session(SPW_SESSION(sess));
-		if (g_nclients == 0)
-		{
-			ret = sp_session_release(g_session);
-			g_session = (sp_session *)NULL;
-		}
+		ret = sp_session_release(g_session);
+		g_session = (sp_session *)NULL;
 	}
 
 	DEBUG_FN("OUT\n");
@@ -168,10 +190,15 @@ SP_LIBEXPORT(sp_error) spw_session_release(sp_session *sess)
 SP_LIBEXPORT(sp_error) spw_session_login(sp_session *session, const char *username, const char *password, bool remember_me, const char *blob)
 {
 	DEBUG_FN("IN\n");
-	sp_error ret = sp_session_login(SP_SESSION(session), username, password, remember_me, blob);
-	if (ret == SP_ERROR_OK)
-		g_logged_in++;
+	sp_error ret = SP_ERROR_OK;
 
+	//if (g_logged_in == 0)
+	ret = sp_session_login(SP_SESSION(session), username, password, remember_me, blob);
+	//else if (SPW_SESSION(session)->cb.logged_in)
+	//	SPW_SESSION(session)->cb.logged_in(session, SP_ERROR_OK);
+
+	//if (ret == SP_ERROR_OK)
+	//	g_logged_in = 1;
 	DEBUG_FN("OUT\n");
 	return ret;
 }
@@ -224,9 +251,13 @@ SP_LIBEXPORT(sp_user *) spw_session_user(sp_session *session)
 SP_LIBEXPORT(sp_error) spw_session_logout(sp_session *session)
 {
 	DEBUG_FN("IN\n");
-	if (g_logged_in > 0)
-		g_logged_in--;
-	sp_error ret = sp_session_logout(SP_SESSION(session));
+	//if (g_logged_in > 0)
+	//	g_logged_in--;
+	sp_error ret = SP_ERROR_OK;
+	//if (g_logged_in == 0)
+	ret = sp_session_logout(SP_SESSION(session));
+	//else if (SPW_SESSION(session)->cb.logged_out)
+	//	SPW_SESSION(session)->cb.logged_out(session);
 	DEBUG_FN("OUT\n");
 
 	return ret;
