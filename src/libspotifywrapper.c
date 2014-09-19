@@ -37,9 +37,11 @@ static void scrobble_error(sp_session *session, sp_error error);
 static void private_session_mode_changed(sp_session *session, bool is_private);
 
 static sp_session *g_session = (sp_session *)NULL;
-static unsigned int g_logged_in = 0;
 static unsigned int g_nclients = 0;
 
+// This table of callbacks are used by the wrapper
+// and intercept all events sent by the spotify
+// session before delivery to the required clients
 static sp_session_callbacks g_callbacks = {
     &logged_in,
     &logged_out,
@@ -64,6 +66,9 @@ static sp_session_callbacks g_callbacks = {
 	&private_session_mode_changed
 };
 
+// Wrapper session structure - we use this to hold state
+// that we need to keep about the client session connection,
+// such as the callbacks and the actual real session structure
 typedef struct spw_session_s
 {
 	sp_session            *s;
@@ -72,10 +77,47 @@ typedef struct spw_session_s
     struct spw_session_s  *prev;
 } spw_session;
 
+// Session structures are dynamically allocated and stored
+// as a linked list
 static spw_session *g_head, *g_tail;
 
+// Useful macros for accessing the session structure
 #define SPW_SESSION(sess) ((spw_session *)sess)
 #define SP_SESSION(sess)  SPW_SESSION(sess)->s
+
+// This structure allows us to discriminate where
+// callback events should be delivered
+// Setting a field to NULL means deliver to all
+// clients, otherwise we deliver only to a single
+// client denoted by the spw_session pointer
+typedef struct spw_session_callback_clients_s
+{
+    spw_session *logged_in;
+    spw_session *logged_out;
+    spw_session *metadata_updated;
+    spw_session *connection_error;
+    spw_session *message_to_user;
+    spw_session *notify_main_thread;
+    spw_session *music_delivery;
+    spw_session *play_token_lost;
+    spw_session *log_message;
+    spw_session *end_of_track;
+    spw_session *streaming_error;
+    spw_session *userinfo_updated;
+    spw_session *start_playback;
+    spw_session *stop_playback;
+    spw_session *get_audio_buffer_stats;
+    spw_session *offline_status_updated;
+    spw_session *offline_error;
+    spw_session *credentials_blob_updated;
+    spw_session *connectionstate_updated;
+    spw_session *scrobble_error;
+    spw_session *private_session_mode_changed;
+
+} spw_session_callback_clients;
+
+// Initialize as 'all clients' receive callbacks
+static spw_session_callback_clients g_callback_clients = { NULL };
 
 static void dump_linked_list(void)
 {
@@ -152,6 +194,8 @@ SP_LIBEXPORT(sp_error) spw_session_create(const sp_session_config *config, sp_se
 	DEBUG_FN("IN\n");
 	sp_error ret = SP_ERROR_OK;
 
+	// Create the real session if no session has
+	// yet been created
 	if (g_session == NULL)
 	{
 		sp_session_config local = *config;
@@ -160,6 +204,8 @@ SP_LIBEXPORT(sp_error) spw_session_create(const sp_session_config *config, sp_se
 		DEBUG_FN("Created new g_session %p\n", g_session);
 	}
 
+	// Create a client session if the real session was
+	// created successfully
 	if (ret == SP_ERROR_OK)
 	{
 		spw_session *spw = spw_alloc_session(config);
@@ -176,6 +222,8 @@ SP_LIBEXPORT(sp_error) spw_session_release(sp_session *sess)
 	DEBUG_FN("IN\n");
 	sp_error ret = SP_ERROR_OK;
 
+	// Free the spw_session but don't release the real
+	// session unless there are no other clients connected
 	spw_free_session(SPW_SESSION(sess));
 	if (g_nclients == 0)
 	{
@@ -190,15 +238,7 @@ SP_LIBEXPORT(sp_error) spw_session_release(sp_session *sess)
 SP_LIBEXPORT(sp_error) spw_session_login(sp_session *session, const char *username, const char *password, bool remember_me, const char *blob)
 {
 	DEBUG_FN("IN\n");
-	sp_error ret = SP_ERROR_OK;
-
-	//if (g_logged_in == 0)
-	ret = sp_session_login(SP_SESSION(session), username, password, remember_me, blob);
-	//else if (SPW_SESSION(session)->cb.logged_in)
-	//	SPW_SESSION(session)->cb.logged_in(session, SP_ERROR_OK);
-
-	//if (ret == SP_ERROR_OK)
-	//	g_logged_in = 1;
+	sp_error ret = sp_session_login(SP_SESSION(session), username, password, remember_me, blob);
 	DEBUG_FN("OUT\n");
 	return ret;
 }
@@ -251,13 +291,7 @@ SP_LIBEXPORT(sp_user *) spw_session_user(sp_session *session)
 SP_LIBEXPORT(sp_error) spw_session_logout(sp_session *session)
 {
 	DEBUG_FN("IN\n");
-	//if (g_logged_in > 0)
-	//	g_logged_in--;
-	sp_error ret = SP_ERROR_OK;
-	//if (g_logged_in == 0)
-	ret = sp_session_logout(SP_SESSION(session));
-	//else if (SPW_SESSION(session)->cb.logged_out)
-	//	SPW_SESSION(session)->cb.logged_out(session);
+	sp_error ret = sp_session_logout(SP_SESSION(session));
 	DEBUG_FN("OUT\n");
 
 	return ret;
@@ -311,6 +345,16 @@ SP_LIBEXPORT(sp_error) spw_session_process_events(sp_session *session, int *next
 SP_LIBEXPORT(sp_error) spw_session_player_load(sp_session *session, sp_track *track)
 {
 	DEBUG_FN("IN\n");
+
+	// Since we're loading a track we expect music notification events and
+	// we must ensure these are only delivered to the originating client
+	g_callback_clients.music_delivery = SPW_SESSION(session);
+	g_callback_clients.play_token_lost = SPW_SESSION(session);
+	g_callback_clients.end_of_track = SPW_SESSION(session);
+	g_callback_clients.streaming_error = SPW_SESSION(session);
+	g_callback_clients.start_playback = SPW_SESSION(session);
+	g_callback_clients.stop_playback = SPW_SESSION(session);
+	g_callback_clients.get_audio_buffer_stats = SPW_SESSION(session);
 	sp_error ret = sp_session_player_load(SP_SESSION(session), track);
 	DEBUG_FN("OUT\n");
 
@@ -746,7 +790,8 @@ SP_LIBEXPORT(sp_inbox *) spw_inbox_post_tracks(sp_session *session, const char *
 	spw_session *p = g_head; \
 	while (p) \
 	{ \
-		if (p->cb.cb_name) { \
+		if (p->cb.cb_name && \
+			(g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
 			DEBUG_FN("Calling user callback\n"); \
 			p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
 		} \
@@ -757,7 +802,8 @@ SP_LIBEXPORT(sp_inbox *) spw_inbox_post_tracks(sp_session *session, const char *
 	spw_session *p = g_head; \
 	while (p) \
 	{ \
-		if (p->cb.cb_name) { \
+		if (p->cb.cb_name && \
+			(g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
 			DEBUG_FN("Calling user callback\n"); \
 			ret = p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
 		} \
