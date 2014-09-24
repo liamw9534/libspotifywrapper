@@ -13,9 +13,9 @@ Build & Installation
 
 Run the following commands::
 
-  ./bootstrap
-  ./configure
-  make
-  sudo make install
+    ./bootstrap
+    ./configure
+    make
+    sudo make install
 
 The installation files will be installed to the same location as libspotify.
