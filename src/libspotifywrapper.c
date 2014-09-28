@@ -1,10 +1,13 @@
-#include <libspotify/api.h>
+#include <dlfcn.h>
 #include <malloc.h>
+#include <sys/queue.h>
+#include <pthread.h>
+#include <libspotify/api.h>
 
 #ifdef WITH_DEBUG
 
 #define DEBUG(str, ...) printf(str, ## __VA_ARGS__)
-#define DEBUG_FN(str, ...) printf("(%d): %s: " str, __LINE__, __func__, ## __VA_ARGS__)
+#define DEBUG_FN(str, ...) printf("[%x](%d): %s: " str, (int)pthread_self(), __LINE__, __func__, ## __VA_ARGS__)
 
 #else
 
@@ -59,6 +62,7 @@ private_session_mode_changed (sp_session *session, bool is_private);
 
 static sp_session *g_session = (sp_session *) NULL;
 static unsigned int g_nclients = 0;
+static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // This table of callbacks are used by the wrapper
 // and intercept all events sent by the spotify
@@ -74,21 +78,17 @@ static sp_session_callbacks g_callbacks =
 // Wrapper session structure - we use this to hold state
 // that we need to keep about the client session connection,
 // such as the callbacks and the actual real session structure
-typedef struct spw_session_s
-{
-  sp_session *s;
-  sp_session_callbacks cb;
-  struct spw_session_s *next;
-  struct spw_session_s *prev;
-} spw_session;
+struct spw_session {
+  sp_session_callbacks     cb;
+  TAILQ_ENTRY(spw_session) tailq;
+};
 
 // Session structures are dynamically allocated and stored
 // as a linked list
-static spw_session *g_head, *g_tail;
+TAILQ_HEAD(, spw_session) g_head;
 
 // Useful macros for accessing the session structure
-#define SPW_SESSION(sess) ((spw_session *)sess)
-#define SP_SESSION(sess)  SPW_SESSION(sess)->s
+#define SPW_SESSION(sess) ((struct spw_session *)sess)
 
 // This structure allows us to discriminate where
 // callback events should be delivered
@@ -97,27 +97,27 @@ static spw_session *g_head, *g_tail;
 // client denoted by the spw_session pointer
 typedef struct spw_session_callback_clients_s
 {
-  spw_session *logged_in;
-  spw_session *logged_out;
-  spw_session *metadata_updated;
-  spw_session *connection_error;
-  spw_session *message_to_user;
-  spw_session *notify_main_thread;
-  spw_session *music_delivery;
-  spw_session *play_token_lost;
-  spw_session *log_message;
-  spw_session *end_of_track;
-  spw_session *streaming_error;
-  spw_session *userinfo_updated;
-  spw_session *start_playback;
-  spw_session *stop_playback;
-  spw_session *get_audio_buffer_stats;
-  spw_session *offline_status_updated;
-  spw_session *offline_error;
-  spw_session *credentials_blob_updated;
-  spw_session *connectionstate_updated;
-  spw_session *scrobble_error;
-  spw_session *private_session_mode_changed;
+  struct spw_session *logged_in;
+  struct spw_session *logged_out;
+  struct spw_session *metadata_updated;
+  struct spw_session *connection_error;
+  struct spw_session *message_to_user;
+  struct spw_session *notify_main_thread;
+  struct spw_session *music_delivery;
+  struct spw_session *play_token_lost;
+  struct spw_session *log_message;
+  struct spw_session *end_of_track;
+  struct spw_session *streaming_error;
+  struct spw_session *userinfo_updated;
+  struct spw_session *start_playback;
+  struct spw_session *stop_playback;
+  struct spw_session *get_audio_buffer_stats;
+  struct spw_session *offline_status_updated;
+  struct spw_session *offline_error;
+  struct spw_session *credentials_blob_updated;
+  struct spw_session *connectionstate_updated;
+  struct spw_session *scrobble_error;
+  struct spw_session *private_session_mode_changed;
 
 } spw_session_callback_clients;
 
@@ -128,41 +128,26 @@ static spw_session_callback_clients g_callback_clients =
 static void
 dump_linked_list (void)
 {
-  spw_session *p = g_head;
-  DEBUG_FN("g_head = %p g_tail = %p\n", g_head, g_tail);
-  unsigned int i = 0;
-  while (p)
+  struct spw_session *p;
+  int i = 0;
+  TAILQ_FOREACH(p, &g_head, tailq)
   {
     DEBUG_FN("Element %p at index %d\n", p, i);
-    p = p->next;
     i++;
   }
 }
 
-static spw_session *
+static struct spw_session *
 spw_alloc_session (const sp_session_config *config)
 {
   DEBUG_FN("IN\n");
 
-  spw_session *spw = (spw_session *) malloc (sizeof(spw_session));
+  struct spw_session *spw = (struct spw_session *) malloc (sizeof(struct spw_session));
   if (spw == NULL)
     return NULL;
 
   spw->cb = *config->callbacks;
-  spw->s = g_session;
-  if (g_nclients == 0)
-  {
-    g_head = g_tail = spw;
-    spw->next = NULL;
-    spw->prev = NULL;
-  }
-  else
-  {
-    spw->next = NULL;
-    spw->prev = g_tail;
-    g_tail->next = spw;
-    g_tail = spw;
-  }
+  TAILQ_INSERT_TAIL(&g_head, spw, tailq);
 
   g_nclients++;
   DEBUG_FN("g_nclients = %d\n", g_nclients);
@@ -176,17 +161,10 @@ spw_alloc_session (const sp_session_config *config)
 }
 
 static void
-spw_free_session (spw_session *spw)
+spw_free_session (struct spw_session *spw)
 {
   DEBUG_FN("IN\n");
-  if (spw->next)
-    spw->next->prev = spw->prev;
-  if (spw->prev)
-    spw->prev->next = spw->next;
-  if (spw == g_tail)
-    g_tail = spw->prev;
-  if (spw == g_head)
-    g_head = spw->next;
+  TAILQ_REMOVE(&g_head, spw, tailq);
   free ((void *) spw);
   g_nclients--;
   DEBUG_FN("g_nclients = %d\n", g_nclients);
@@ -198,9 +176,13 @@ spw_free_session (spw_session *spw)
   DEBUG_FN("OUT\n");
 }
 
-sp_error spw_session_create(const sp_session_config *config, sp_session **sess)
+/* This code is autogenerated by codegen.py --libspotify */
+#include "autogen_libspotify.c"
+
+sp_error sp_session_create(const sp_session_config *config, sp_session **sess)
 {
-  DEBUG_FN("IN\n");sp_error ret = SP_ERROR_OK;
+  DEBUG_FN("IN\n");
+  sp_error ret = SP_ERROR_OK;
 
   // Create the real session if no session has
   // yet been created
@@ -208,624 +190,93 @@ sp_error spw_session_create(const sp_session_config *config, sp_session **sess)
   {
     sp_session_config local = *config;
     local.callbacks = &g_callbacks;
-    ret = sp_session_create(&local, &g_session);
-    DEBUG_FN("Created new g_session %p\n", g_session);}
+    TAILQ_INIT(&g_head);
+    init___();
+    ret = g_libspotify.sp_session_create(&local, &g_session);
+    DEBUG_FN("Created new g_session %p\n", g_session);
+  }
 
   // Create a client session if the real session was
   // created successfully
   if (ret == SP_ERROR_OK)
   {
-    spw_session *spw = spw_alloc_session(config);
+    struct spw_session *spw = spw_alloc_session(config);
     *sess = (sp_session *)spw;
-    DEBUG_FN(
-        "Created spw %p\n", spw);}
-
-  DEBUG_FN("OUT\n");
-  return ret;
-}
-
-sp_error spw_session_release(sp_session *sess)
-{
-  DEBUG_FN("IN\n");sp_error ret = SP_ERROR_OK;
-
-  // Free the spw_session but don't release the real
-  // session unless there are no other clients connected
-  spw_free_session(SPW_SESSION(sess));
-  if (g_nclients == 0)
-  {
-    ret = sp_session_release(g_session);
-    g_session = (sp_session *)NULL;
+    DEBUG_FN("Created spw %p\n", spw);
   }
 
   DEBUG_FN("OUT\n");
   return ret;
 }
 
-sp_error
-spw_session_login(sp_session *session, const char *username, const char *password, bool remember_me, const char *blob)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_login(SP_SESSION(session), username, password, remember_me, blob);
-  DEBUG_FN("OUT\n");
-  return ret;
-}
-
-sp_error
-spw_session_relogin(sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_relogin(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-int
-spw_session_remembered_user (sp_session *session, char *buffer,
-                             size_t buffer_size)
+sp_error sp_session_release(sp_session *sess)
 {
   DEBUG_FN("IN\n");
-  int ret = sp_session_remembered_user (SP_SESSION(session), buffer, buffer_size);
-  DEBUG_FN("OUT\n");
+  sp_error ret = SP_ERROR_OK;
 
+  // Free the spw_session but don't release the real
+  // session unless there are no other clients connected
+  spw_free_session(SPW_SESSION(sess));
+  if (g_nclients == 0)
+  {
+    sp_error ret = g_libspotify.sp_session_release(g_session);
+    g_session = (sp_session *)NULL;
+    return ret;
+  }
+
+  DEBUG_FN("OUT\n");
   return ret;
 }
 
-const char *
-spw_session_user_name (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  const char *ret = sp_session_user_name (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_forget_me(sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_forget_me(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_user *
-spw_session_user (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  sp_user *ret = sp_session_user (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_logout(sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_logout(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_flush_caches(sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_flush_caches(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_connectionstate spw_session_connectionstate(sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_connectionstate ret = sp_session_connectionstate(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-void *
-spw_session_userdata (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  void *ret = sp_session_userdata (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_cache_size(sp_session *session, size_t size)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_cache_size(SP_SESSION(session), size);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_process_events(sp_session *session, int *next_timeout)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_process_events(SP_SESSION(session), next_timeout);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_player_load(sp_session *session, sp_track *track)
+sp_error sp_session_player_load(sp_session *session, sp_track *track)
 {
   DEBUG_FN("IN\n");
 
   // Since we're loading a track we expect music notification events and
   // we must ensure these are only delivered to the originating client
-  g_callback_clients.music_delivery = SPW_SESSION(session);g_callback_clients.play_token_lost = SPW_SESSION(session);g_callback_clients.end_of_track = SPW_SESSION(session);g_callback_clients.streaming_error = SPW_SESSION(
-      session);g_callback_clients.start_playback = SPW_SESSION(session);g_callback_clients.stop_playback = SPW_SESSION(session);g_callback_clients.get_audio_buffer_stats = SPW_SESSION(session);sp_error ret = sp_session_player_load(SP_SESSION(
-          session), track);
-      DEBUG_FN("OUT\n");
+  g_callback_clients.music_delivery = SPW_SESSION(session);
+  g_callback_clients.play_token_lost = SPW_SESSION(session);
+  g_callback_clients.end_of_track = SPW_SESSION(session);
+  g_callback_clients.streaming_error = SPW_SESSION(session);
+  g_callback_clients.start_playback = SPW_SESSION(session);
+  g_callback_clients.stop_playback = SPW_SESSION(session);
+  g_callback_clients.get_audio_buffer_stats = SPW_SESSION(session);
 
-      return ret;
-}
-
-sp_error spw_session_player_seek(sp_session *session, int offset)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_player_seek(SP_SESSION(session), offset);
+  sp_error ret = g_libspotify.sp_session_player_load(g_session, track);
   DEBUG_FN("OUT\n");
-
   return ret;
 }
 
-sp_error spw_session_player_play(sp_session *session, bool play)
+sp_error sp_session_process_events(sp_session *session, int *next_timeout)
 {
-  DEBUG_FN("IN\n");sp_error ret = sp_session_player_play(SP_SESSION(session), play);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_player_unload(sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_player_unload(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_player_prefetch(sp_session *session, sp_track *track)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_player_prefetch(SP_SESSION(session), track);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlistcontainer *
-spw_session_playlistcontainer (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  sp_playlistcontainer *ret = sp_session_playlistcontainer (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlist *
-spw_session_inbox_create (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  sp_playlist *ret = sp_session_inbox_create (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlist *
-spw_session_starred_create (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  sp_playlist *ret = sp_session_starred_create (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlist *
-spw_session_starred_for_user_create (sp_session *session,
-                                     const char *canonical_username)
-{
-  DEBUG_FN("IN\n");
-  sp_playlist *ret = sp_session_starred_for_user_create (SP_SESSION(session),
-                                                         canonical_username);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlistcontainer *
-spw_session_publishedcontainer_for_user_create (sp_session *session,
-                                                const char *canonical_username)
-{
-  DEBUG_FN("IN\n");
-  sp_playlistcontainer *ret = sp_session_publishedcontainer_for_user_create (
-      SP_SESSION(session), canonical_username);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_preferred_bitrate(sp_session *session, sp_bitrate bitrate)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_preferred_bitrate(SP_SESSION(session), bitrate);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_preferred_offline_bitrate(sp_session *session, sp_bitrate bitrate, bool allow_resync)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_preferred_offline_bitrate(SP_SESSION(session), bitrate, allow_resync);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_session_get_volume_normalization(sp_session *session)
-{
-  DEBUG_FN("IN\n");bool ret = sp_session_get_volume_normalization(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_volume_normalization(sp_session *session, bool on)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_volume_normalization(SP_SESSION(session), on);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_private_session(sp_session *session, bool enabled)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_private_session(SP_SESSION(session), enabled);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_session_is_private_session(sp_session *session)
-{
-  DEBUG_FN("IN\n");bool ret = sp_session_is_private_session(SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_scrobbling(sp_session *session, sp_social_provider provider, sp_scrobbling_state state)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_scrobbling(SP_SESSION(session), provider, state);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_is_scrobbling(sp_session *session, sp_social_provider provider, sp_scrobbling_state* state)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_is_scrobbling(SP_SESSION(session), provider, state);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_is_scrobbling_possible(sp_session *session, sp_social_provider provider, bool* out)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_is_scrobbling_possible(SP_SESSION(session), provider, out);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_social_credentials(sp_session *session, sp_social_provider provider, const char* username, const char* password)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_social_credentials(SP_SESSION(session), provider, username, password);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_connection_type(sp_session *session, sp_connection_type type)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_connection_type(SP_SESSION(session), type);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_session_set_connection_rules(sp_session *session, sp_connection_rules rules)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_session_set_connection_rules(SP_SESSION(session), rules);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-int
-spw_offline_tracks_to_sync (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  sp_error ret = sp_offline_tracks_to_sync (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-int
-spw_offline_num_playlists (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  int ret = sp_offline_num_playlists (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_offline_sync_get_status(sp_session *session, sp_offline_sync_status *status)
-{
-  DEBUG_FN("IN\n");bool ret = sp_offline_sync_get_status(SP_SESSION(session), status);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-int
-spw_offline_time_left (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  int ret = sp_offline_time_left (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-int
-spw_session_user_country (sp_session *session)
-{
-  DEBUG_FN("IN\n");
-  int ret = sp_session_user_country (SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_track_availability spw_track_get_availability(sp_session *session, sp_track *track)
-{
-  DEBUG_FN("IN\n");sp_track_availability ret = sp_track_get_availability(SP_SESSION(session), track);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_track_is_local(sp_session *session, sp_track *track)
-{
-  DEBUG_FN("IN\n");bool ret = sp_track_is_local(SP_SESSION(session), track);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_track_is_autolinked(sp_session *session, sp_track *track)
-{
-  DEBUG_FN("IN\n");bool ret = sp_track_is_autolinked(SP_SESSION(session), track);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_track *
-spw_track_get_playable (sp_session *session, sp_track *track)
-{
-  DEBUG_FN("IN\n");
-  sp_track *ret = sp_track_get_playable (SP_SESSION(session), track);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_track_is_starred(sp_session *session, sp_track *track)
-{
-  DEBUG_FN("IN\n");bool ret = sp_track_is_starred(SP_SESSION(session), track);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_track_set_starred(sp_session *session, sp_track *const*tracks, int num_tracks, bool star)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_track_set_starred(SP_SESSION(session), tracks, num_tracks, star);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_albumbrowse *
-spw_albumbrowse_create (sp_session *session, sp_album *album,
-                        albumbrowse_complete_cb *callback, void *userdata)
-{
-  DEBUG_FN("IN\n");
-  sp_albumbrowse *ret = sp_albumbrowse_create (SP_SESSION(session), album,
-                                               callback, userdata);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_artistbrowse *
-spw_artistbrowse_create (sp_session *session, sp_artist *artist,
-                         sp_artistbrowse_type type,
-                         artistbrowse_complete_cb *callback, void *userdata)
-{
-  DEBUG_FN("IN\n");
-  sp_artistbrowse *ret = sp_artistbrowse_create (SP_SESSION(session), artist,
-                                                 type, callback, userdata);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_image *
-spw_image_create (sp_session *session, const byte image_id[20])
-{
-  DEBUG_FN("IN\n");
-  sp_image *ret = sp_image_create (SP_SESSION(session), image_id);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_image *
-spw_image_create_from_link (sp_session *session, sp_link *l)
-{
-  DEBUG_FN("IN\n");
-  sp_image *ret = sp_image_create_from_link (SP_SESSION(session), l);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_search *
-spw_search_create (sp_session *session, const char *query, int track_offset,
-                   int track_count, int album_offset, int album_count,
-                   int artist_offset, int artist_count, int playlist_offset,
-                   int playlist_count, sp_search_type search_type,
-                   search_complete_cb *callback, void *userdata)
-{
-  DEBUG_FN("IN\n");
-  sp_search *ret = sp_search_create (SP_SESSION(session), query, track_offset,
-                                     track_count, album_offset, album_count,
-                                     artist_offset, artist_count, playlist_offset,
-                                     playlist_count, search_type, callback,
-                                     userdata);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_playlist_add_tracks(sp_playlist *playlist, sp_track *const*tracks, int num_tracks, int position, sp_session *session)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_playlist_add_tracks(playlist, tracks, num_tracks, position, SP_SESSION(session));
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_playlist_update_subscribers(sp_session *session, sp_playlist *playlist)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_playlist_update_subscribers(SP_SESSION(session), playlist);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-bool spw_playlist_is_in_ram(sp_session *session, sp_playlist *playlist)
-{
-  DEBUG_FN("IN\n");bool ret = sp_playlist_is_in_ram(SP_SESSION(session), playlist);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_playlist_set_in_ram(sp_session *session, sp_playlist *playlist, bool in_ram)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_playlist_set_in_ram(SP_SESSION(session), playlist, in_ram);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlist *
-spw_playlist_create (sp_session *session, sp_link *link)
-{
-  DEBUG_FN("IN\n");
-  sp_playlist *ret = sp_playlist_create (SP_SESSION(session), link);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_error spw_playlist_set_offline_mode(sp_session *session, sp_playlist *playlist, bool offline)
-{
-  DEBUG_FN("IN\n");sp_error ret = sp_playlist_set_offline_mode(SP_SESSION(session), playlist, offline);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_playlist_offline_status spw_playlist_get_offline_status(sp_session *session, sp_playlist *playlist)
-{
-  DEBUG_FN("IN\n");sp_playlist_offline_status ret = sp_playlist_get_offline_status(SP_SESSION(session), playlist);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-int
-spw_playlist_get_offline_download_completed (sp_session *session,
-                                             sp_playlist *playlist)
-{
-  DEBUG_FN("IN\n");
-  int ret = sp_playlist_get_offline_download_completed (SP_SESSION(session),
-                                                        playlist);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_toplistbrowse *
-spw_toplistbrowse_create (sp_session *session, sp_toplisttype type,
-                          sp_toplistregion region, const char *username,
-                          toplistbrowse_complete_cb *callback, void *userdata)
-{
-  DEBUG_FN("IN\n");
-  sp_toplistbrowse *ret = sp_toplistbrowse_create (SP_SESSION(session), type,
-                                                   region, username, callback,
-                                                   userdata);
-  DEBUG_FN("OUT\n");
-
-  return ret;
-}
-
-sp_inbox *
-spw_inbox_post_tracks (sp_session *session, const char *user,
-                       sp_track * const *tracks, int num_tracks,
-                       const char *message, inboxpost_complete_cb *callback,
-                       void *userdata)
-{
-  DEBUG_FN("IN\n");
-  sp_inbox *ret = sp_inbox_post_tracks (SP_SESSION(session), user, tracks,
-                                        num_tracks, message, callback, userdata);
-  DEBUG_FN("OUT\n");
-
+  pthread_mutex_lock(&g_mutex);
+  sp_error ret = g_libspotify.sp_session_process_events(g_session, next_timeout);
+  pthread_mutex_unlock(&g_mutex);
   return ret;
 }
 
 // Callbacks
 
 #define DISPATCH_CALLBACK(cb_name, ...) \
-    spw_session *p = g_head; \
-    while (p) \
+    struct spw_session *p; \
+    TAILQ_FOREACH(p, &g_head, tailq) \
     { \
       if (p->cb.cb_name && \
           (g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
           DEBUG_FN("Calling user callback\n"); \
           p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
       } \
-      p = p->next; \
     }
 
 #define DISPATCH_CALLBACK_WITH_RETURN(ret, cb_name, ...) \
-    spw_session *p = g_head; \
-    while (p) \
+    struct spw_session *p; \
+    TAILQ_FOREACH(p, &g_head, tailq) \
     { \
       if (p->cb.cb_name && \
           (g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
           DEBUG_FN("Calling user callback\n"); \
           ret = p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
       } \
-      p = p->next; \
     }
 
 static void
@@ -977,3 +428,6 @@ private_session_mode_changed (sp_session *session, bool is_private)
   DEBUG_FN("IN\n");
   DISPATCH_CALLBACK(private_session_mode_changed, is_private); DEBUG_FN("OUT\n");
 }
+
+/* This code is autogenerated by codegen.py --api */
+#include "autogen_api.c"
