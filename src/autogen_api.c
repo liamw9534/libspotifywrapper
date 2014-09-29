@@ -118,11 +118,6 @@ sp_albumbrowse * sp_albumbrowse_create(sp_session *session, sp_album *album, alb
   return g_libspotify.sp_albumbrowse_create(g_session, album, callback, userdata);
 }
 
-sp_error sp_session_logout(sp_session *session)
-{
-  return g_libspotify.sp_session_logout(g_session);
-}
-
 sp_error sp_playlist_remove_tracks(sp_playlist *playlist, const int *tracks, int num_tracks)
 {
   return g_libspotify.sp_playlist_remove_tracks(playlist, tracks, num_tracks);
@@ -221,11 +216,6 @@ sp_link * sp_link_create_from_artistbrowse_portrait(sp_artistbrowse *arb, int in
 sp_error sp_link_add_ref(sp_link *link)
 {
   return g_libspotify.sp_link_add_ref(link);
-}
-
-sp_error sp_session_login(sp_session *session, const char *username, const char *password, bool remember_me, const char *blob)
-{
-  return g_libspotify.sp_session_login(g_session, username, password, remember_me, blob);
 }
 
 sp_error sp_toplistbrowse_error(sp_toplistbrowse *tlb)

@@ -62,6 +62,7 @@ private_session_mode_changed (sp_session *session, bool is_private);
 
 static sp_session *g_session = (sp_session *) NULL;
 static unsigned int g_nclients = 0;
+static unsigned int g_nloggedin = 0;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // This table of callbacks are used by the wrapper
@@ -226,6 +227,36 @@ sp_error sp_session_release(sp_session *sess)
 
   DEBUG_FN("OUT\n");
   return ret;
+}
+
+sp_error sp_session_login(sp_session *session, const char *username, const char *password, bool remember_me, const char *blob)
+{
+  if (g_nloggedin)
+  {
+    if (SPW_SESSION(session)->cb.logged_in)
+      SPW_SESSION(session)->cb.logged_in(session, SP_ERROR_OK);
+    return SP_ERROR_OK;
+  } else {
+    sp_error ret = g_libspotify.sp_session_login(g_session, username, password, remember_me, blob);
+    if (ret == SP_ERROR_OK)
+      g_nloggedin++;
+    return ret;
+  }
+}
+
+sp_error sp_session_logout(sp_session *session)
+{
+  if (g_nloggedin == 1)
+  {
+    sp_error ret = g_libspotify.sp_session_logout(g_session);
+    if (ret == SP_ERROR_OK)
+      g_nloggedin--;
+    return ret;
+  } else if (g_nloggedin > 1) {
+    if (SPW_SESSION(session)->cb.logged_out)
+      SPW_SESSION(session)->cb.logged_out(session);
+    return SP_ERROR_OK;
+  }
 }
 
 sp_error sp_session_player_load(sp_session *session, sp_track *track)
