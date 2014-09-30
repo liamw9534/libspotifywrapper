@@ -64,6 +64,11 @@ static sp_session *g_session = (sp_session *) NULL;
 static unsigned int g_nclients = 0;
 static unsigned int g_nloggedin = 0;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_mutex_thr = (pthread_t)NULL;
+static int g_mutex_ref = 0;
+static pthread_mutex_t g_barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_barrier_cond = PTHREAD_COND_INITIALIZER;
+static int g_nwaiting = 0;
 
 // This table of callbacks are used by the wrapper
 // and intercept all events sent by the spotify
@@ -126,6 +131,68 @@ typedef struct spw_session_callback_clients_s
 static spw_session_callback_clients g_callback_clients =
     { NULL };
 
+static void lock(void)
+{
+  if (pthread_mutex_trylock(&g_mutex) != 0 &&
+      g_mutex_thr != pthread_self())
+    pthread_mutex_lock(&g_mutex);
+  g_mutex_thr = pthread_self();
+  g_mutex_ref++;
+}
+
+static void unlock(void)
+{
+  g_mutex_ref--;
+  if (g_mutex_ref == 0) {
+    g_mutex_thr = (pthread_t)NULL;
+    pthread_mutex_unlock(&g_mutex);
+  }
+}
+
+static void barrier_enter(void)
+{
+  DEBUG_FN("IN\n");
+  int is_last = 1;
+
+  pthread_mutex_lock(&g_barrier_mutex);
+  g_nwaiting++;
+  DEBUG_FN("g_nwaiting = %d\n", g_nwaiting);
+
+  if (g_nwaiting < g_nclients) {
+    is_last = 0;
+    pthread_cond_wait(&g_barrier_cond, &g_barrier_mutex);
+  }
+
+  pthread_mutex_unlock(&g_barrier_mutex);
+  if (is_last) {
+    DEBUG_FN("pthread_cond_broadcast\n");
+    pthread_cond_broadcast(&g_barrier_cond);
+  }
+  DEBUG_FN("OUT\n");
+}
+
+static void barrier_exit(void)
+{
+  DEBUG_FN("IN\n");
+  int is_last = 1;
+
+  pthread_mutex_lock(&g_barrier_mutex);
+  g_nwaiting--;
+  DEBUG_FN("g_nwaiting = %d\n", g_nwaiting);
+
+  if (g_nwaiting > 0) {
+    is_last = 0;
+    pthread_cond_wait(&g_barrier_cond, &g_barrier_mutex);
+  }
+
+  pthread_mutex_unlock(&g_barrier_mutex);
+  if (is_last) {
+    DEBUG_FN("pthread_cond_broadcast\n");
+    pthread_cond_broadcast(&g_barrier_cond);
+  }
+  DEBUG_FN("OUT\n");
+}
+
 static void
 dump_linked_list (void)
 {
@@ -150,7 +217,10 @@ spw_alloc_session (const sp_session_config *config)
   spw->cb = *config->callbacks;
   TAILQ_INSERT_TAIL(&g_head, spw, tailq);
 
+  pthread_mutex_lock(&g_barrier_mutex);
   g_nclients++;
+  pthread_mutex_unlock(&g_barrier_mutex);
+
   DEBUG_FN("g_nclients = %d\n", g_nclients);
 
 #ifdef WITH_DEBUG
@@ -167,7 +237,12 @@ spw_free_session (struct spw_session *spw)
   DEBUG_FN("IN\n");
   TAILQ_REMOVE(&g_head, spw, tailq);
   free ((void *) spw);
+  pthread_mutex_lock(&g_barrier_mutex);
   g_nclients--;
+  pthread_mutex_unlock(&g_barrier_mutex);
+  if (g_nwaiting)
+    pthread_cond_broadcast(&g_barrier_cond);
+
   DEBUG_FN("g_nclients = %d\n", g_nclients);
 
 #ifdef WITH_DEBUG
@@ -193,7 +268,9 @@ sp_error sp_session_create(const sp_session_config *config, sp_session **sess)
     local.callbacks = &g_callbacks;
     TAILQ_INIT(&g_head);
     init___();
+    lock();
     ret = g_libspotify.sp_session_create(&local, &g_session);
+    unlock();
     DEBUG_FN("Created new g_session %p\n", g_session);
   }
 
@@ -237,9 +314,13 @@ sp_error sp_session_login(sp_session *session, const char *username, const char 
       SPW_SESSION(session)->cb.logged_in(session, SP_ERROR_OK);
     return SP_ERROR_OK;
   } else {
+    lock();
     sp_error ret = g_libspotify.sp_session_login(g_session, username, password, remember_me, blob);
+    unlock();
+    pthread_mutex_lock(&g_barrier_mutex);
     if (ret == SP_ERROR_OK)
       g_nloggedin++;
+    pthread_mutex_unlock(&g_barrier_mutex);
     return ret;
   }
 }
@@ -248,9 +329,13 @@ sp_error sp_session_logout(sp_session *session)
 {
   if (g_nloggedin == 1)
   {
+    lock();
     sp_error ret = g_libspotify.sp_session_logout(g_session);
+    unlock();
+    pthread_mutex_lock(&g_barrier_mutex);
     if (ret == SP_ERROR_OK)
       g_nloggedin--;
+    pthread_mutex_unlock(&g_barrier_mutex);
     return ret;
   } else if (g_nloggedin > 1) {
     if (SPW_SESSION(session)->cb.logged_out)
@@ -273,16 +358,22 @@ sp_error sp_session_player_load(sp_session *session, sp_track *track)
   g_callback_clients.stop_playback = SPW_SESSION(session);
   g_callback_clients.get_audio_buffer_stats = SPW_SESSION(session);
 
+  lock();
   sp_error ret = g_libspotify.sp_session_player_load(g_session, track);
+  unlock();
   DEBUG_FN("OUT\n");
   return ret;
 }
 
 sp_error sp_session_process_events(sp_session *session, int *next_timeout)
 {
-  pthread_mutex_lock(&g_mutex);
+  DEBUG_FN("IN\n");
+  barrier_enter(); /* Wait for all clients to enter */
+  lock(); /* Allow one at a time */
   sp_error ret = g_libspotify.sp_session_process_events(g_session, next_timeout);
-  pthread_mutex_unlock(&g_mutex);
+  unlock();
+  barrier_exit(); /* Wait until all clients have finished */
+  DEBUG_FN("OUT\n");
   return ret;
 }
 
