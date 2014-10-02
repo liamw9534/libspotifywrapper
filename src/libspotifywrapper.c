@@ -133,20 +133,24 @@ static spw_session_callback_clients g_callback_clients =
 
 static void lock(void)
 {
+  DEBUG_FN("IN\n");
   if (pthread_mutex_trylock(&g_mutex) != 0 &&
       g_mutex_thr != pthread_self())
     pthread_mutex_lock(&g_mutex);
   g_mutex_thr = pthread_self();
   g_mutex_ref++;
+  DEBUG_FN("OUT\n");
 }
 
 static void unlock(void)
 {
+  DEBUG_FN("IN\n");
   g_mutex_ref--;
   if (g_mutex_ref == 0) {
     g_mutex_thr = (pthread_t)NULL;
     pthread_mutex_unlock(&g_mutex);
   }
+  DEBUG_FN("OUT\n");
 }
 
 static void barrier_enter(void)
@@ -369,9 +373,9 @@ sp_error sp_session_process_events(sp_session *session, int *next_timeout)
 {
   DEBUG_FN("IN\n");
   barrier_enter(); /* Wait for all clients to enter */
-  lock(); /* Allow one at a time */
+  pthread_mutex_lock(&g_barrier_mutex);
   sp_error ret = g_libspotify.sp_session_process_events(g_session, next_timeout);
-  unlock();
+  pthread_mutex_unlock(&g_barrier_mutex);
   barrier_exit(); /* Wait until all clients have finished */
   DEBUG_FN("OUT\n");
   return ret;

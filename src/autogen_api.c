@@ -1013,10 +1013,10 @@ int sp_toplistbrowse_num_artists(sp_toplistbrowse *tlb)
 void * sp_session_userdata(sp_session *session)
 {
   DEBUG_FN("IN\n");
-  //lock();
+  lock();
   void * ret;
   ret = g_libspotify.sp_session_userdata(g_session);
-  //unlock();
+  unlock();
   DEBUG_FN("OUT\n");
   return ret;
 }
