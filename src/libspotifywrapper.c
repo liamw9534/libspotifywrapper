@@ -381,11 +381,11 @@ sp_error sp_session_player_load(sp_session *session, sp_track *track)
 sp_error sp_session_process_events(sp_session *session, int *next_timeout)
 {
   DEBUG_FN("IN\n");
-  barrier_enter(); /* Wait for all clients to enter */
+  //barrier_enter(); /* Wait for all clients to enter */
   pthread_mutex_lock(&g_barrier_mutex); /* Allow one client at a time */
   sp_error ret = g_libspotify.sp_session_process_events(g_session, next_timeout);
   pthread_mutex_unlock(&g_barrier_mutex);
-  barrier_exit(); /* Wait until all clients have finished */
+  //barrier_exit(); /* Wait until all clients have finished */
   DEBUG_FN("OUT\n");
   return ret;
 }
