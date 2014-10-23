@@ -397,13 +397,11 @@ sp_error sp_session_process_events(sp_session *session, int *next_timeout)
     pthread_mutex_lock(&g_queue_mutex);  \
     TAILQ_FOREACH(p, &g_head, tailq) \
     { \
-      pthread_mutex_unlock(&g_queue_mutex); \
       if (p->cb.cb_name && \
           (g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
           DEBUG_FN("Calling user callback\n"); \
           p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
       } \
-      pthread_mutex_lock(&g_queue_mutex); \
     } \
     pthread_mutex_unlock(&g_queue_mutex)
 
@@ -412,13 +410,11 @@ sp_error sp_session_process_events(sp_session *session, int *next_timeout)
     pthread_mutex_lock(&g_queue_mutex); \
     TAILQ_FOREACH(p, &g_head, tailq) \
     { \
-      pthread_mutex_unlock(&g_queue_mutex); \
       if (p->cb.cb_name && \
           (g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
           DEBUG_FN("Calling user callback\n"); \
           ret = p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
       } \
-      pthread_mutex_lock(&g_queue_mutex); \
     } \
     pthread_mutex_unlock(&g_queue_mutex)
 
