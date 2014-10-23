@@ -70,6 +70,7 @@ static int g_mutex_ref = 0;
 static pthread_mutex_t g_barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_barrier_cond = PTHREAD_COND_INITIALIZER;
 static int g_nwaiting = 0;
+static int g_safe_to_free = 1;
 
 // This table of callbacks are used by the wrapper
 // and intercept all events sent by the spotify
@@ -239,7 +240,14 @@ static int
 spw_free_session (struct spw_session *spw)
 {
   DEBUG_FN("IN\n");
-  pthread_mutex_lock(&g_queue_mutex);
+  for (;;) {
+    pthread_mutex_lock(&g_queue_mutex);
+    if (g_safe_to_free)
+      break;
+    pthread_mutex_unlock(&g_queue_mutex);
+    usleep(100);
+  }
+
   TAILQ_REMOVE(&g_head, spw, tailq);
   g_nclients--;
   int n = g_nclients;
@@ -395,27 +403,35 @@ sp_error sp_session_process_events(sp_session *session, int *next_timeout)
 #define DISPATCH_CALLBACK(cb_name, ...) \
     struct spw_session *p; \
     pthread_mutex_lock(&g_queue_mutex);  \
+    g_safe_to_free = 0; \
     TAILQ_FOREACH(p, &g_head, tailq) \
     { \
+      pthread_mutex_unlock(&g_queue_mutex); \
       if (p->cb.cb_name && \
           (g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
           DEBUG_FN("Calling user callback\n"); \
           p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
       } \
+      pthread_mutex_lock(&g_queue_mutex); \
     } \
+    g_safe_to_free = 1; \
     pthread_mutex_unlock(&g_queue_mutex)
 
 #define DISPATCH_CALLBACK_WITH_RETURN(ret, cb_name, ...) \
     struct spw_session *p; \
     pthread_mutex_lock(&g_queue_mutex); \
+    g_safe_to_free = 0; \
     TAILQ_FOREACH(p, &g_head, tailq) \
     { \
+      pthread_mutex_unlock(&g_queue_mutex); \
       if (p->cb.cb_name && \
           (g_callback_clients.cb_name == NULL || g_callback_clients.cb_name == p)) { \
           DEBUG_FN("Calling user callback\n"); \
           ret = p->cb.cb_name((sp_session *)p, ## __VA_ARGS__); \
       } \
+      pthread_mutex_lock(&g_queue_mutex); \
     } \
+    g_safe_to_free = 1; \
     pthread_mutex_unlock(&g_queue_mutex)
 
 static void
